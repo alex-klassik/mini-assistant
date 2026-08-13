@@ -1,0 +1,16 @@
+target/
+*.class
+*.log
+
+# генерируется maven-shade-plugin в корне модуля при mvn package
+dependency-reduced-pom.xml
+
+# локальные данные приложения (seen-store, reminders, audit) - не для git
+/data/
+
+# на случай локального .env - секреты должны идти только из реальных env, не из файла в репо
+.env
+
+.idea/
+*.iml
+.vscode/

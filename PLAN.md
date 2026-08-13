@@ -57,7 +57,7 @@ tool-loop с телом письма как запросом → ответит�
 
 | Артефакт | Версия | Примечание |
 |---|---|---|
-| `net.sf.jacob-project:jacob` | `1.20`, classifier `x64` | exclude из test-classpath (surefire `classpathDependencyExcludes`) — иначе статический инициализатор роняет JVM на Linux/CI |
+| `net.sf.jacob-project:jacob` | `1.20`, без classifier | exclude из test-classpath (surefire `classpathDependencyExcludes`) — иначе статический инициализатор роняет JVM на Linux/CI. Нативная `jacob-1.20-x64.dll` ставится отдельно на PATH окружением, в Maven тянутся только Java-классы |
 | `com.squareup.okhttp3:okhttp` | `3.14.9` | последняя версия до перехода на Kotlin, чистая Java |
 | `com.fasterxml.jackson.core:jackson-databind` + `jackson-dataformat-yaml` | `2.15.x` | конфиг + сериализация JSON-сторов |
 | `org.slf4j:slf4j-api` | `1.7.36` | |
