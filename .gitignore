@@ -11,6 +11,9 @@ dependency-reduced-pom.xml
 # на случай локального .env - секреты должны идти только из реальных env, не из файла в репо
 .env
 
+# рабочий конфиг с реальными mail.profile/store.path - в git идёт только config.example.yaml
+config.yaml
+
 .idea/
 *.iml
 .vscode/
