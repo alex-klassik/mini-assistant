@@ -1,6 +1,8 @@
 package com.miniassistant.agent;
 
 import com.miniassistant.llm.ChatMessage;
+import com.miniassistant.logging.Events;
+import com.miniassistant.logging.PiiMasker;
 import com.miniassistant.mail.MailChannel;
 import com.miniassistant.mail.Msg;
 import com.miniassistant.store.SeenStore;
@@ -31,7 +33,10 @@ import java.util.List;
  * </ul>
  * В обоих случаях исключение гасится и пишется в лог как WARN, наружу
  * {@code processUnread()} не бросает ничего - один плохой ответ модели или
- * один сбой отправки не должны обрывать обработку всего батча писем.
+ * один сбой отправки не должны обрывать обработку всего батча писем. Текст
+ * тела письма в лог никогда не попадает; текст исключения перед записью
+ * дополнительно прогоняется через {@link PiiMasker} (M10) - на случай, если
+ * сторонняя ошибка (например, от почтового сервера) сама содержит email.
  */
 public final class AgentService {
 
@@ -68,14 +73,16 @@ public final class AgentService {
             try {
                 answer = answerFor(msg);
             } catch (RuntimeException e) {
-                logger.warn("event=llm_failed msgId={} error={}", msg.getId(), e.toString());
+                logger.warn("event={} msgId={} error={}", Events.LLM_FAILED, msg.getId(),
+                        PiiMasker.mask(e.toString()));
                 answer = LLM_FAILURE_FALLBACK;
             }
 
             try {
                 mailChannel.reply(msg, answer);
             } catch (RuntimeException e) {
-                logger.warn("event=mail_send_failed msgId={} error={}", msg.getId(), e.toString());
+                logger.warn("event={} msgId={} error={}", Events.MAIL_SEND_FAILED, msg.getId(),
+                        PiiMasker.mask(e.toString()));
                 continue;
             }
 
