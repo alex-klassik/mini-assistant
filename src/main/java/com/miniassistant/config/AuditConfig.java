@@ -15,4 +15,19 @@ public final class AuditConfig {
     public void setHmacKeyEnv(String hmacKeyEnv) {
         this.hmacKeyEnv = hmacKeyEnv;
     }
+
+    /**
+     * Значение самого HMAC-ключа - из переменной окружения, чьё имя задано в
+     * {@link #getHmacKeyEnv()}.
+     *
+     * @throws IllegalStateException переменная не задана в окружении
+     */
+    public String resolveHmacKey(EnvProvider env) {
+        String value = env.getenv(hmacKeyEnv);
+        if (value == null) {
+            throw new IllegalStateException(
+                    "environment variable '" + hmacKeyEnv + "' (audit.hmacKeyEnv) is not set");
+        }
+        return value;
+    }
 }
