@@ -1,8 +1,12 @@
 package com.miniassistant.agent;
 
+import com.miniassistant.llm.ChatMessage;
 import com.miniassistant.llm.ChatResponse;
+import com.miniassistant.llm.LlmClient;
 import com.miniassistant.llm.MockLlmClient;
 import com.miniassistant.llm.ToolCall;
+import com.miniassistant.llm.ToolSpec;
+import com.miniassistant.mail.MailChannel;
 import com.miniassistant.mail.MockMailChannel;
 import com.miniassistant.mail.Msg;
 import com.miniassistant.store.SeenStore;
@@ -21,11 +25,13 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -129,6 +135,96 @@ public class AgentServiceTest {
 
         assertEquals(1, mailChannel.repliesSent().size());
         assertEquals(1, reminderStore.findByText("позвонить клиенту").size());
+    }
+
+    @Test
+    public void llmFailureSendsFallbackReplyMarksSeenAndDoesNotRetryOnNextPoll() {
+        Msg msg = new Msg("msg-1", "user@example.com", "Вопрос",
+                "Расскажи анекдот", Instant.parse("2026-08-14T09:00:00Z"));
+        MockMailChannel mailChannel = new MockMailChannel(msg);
+
+        CountingThrowingLlmClient llm = new CountingThrowingLlmClient();
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
+        ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+
+        agentService.processUnread();
+        // Повторный опрос не должен снова дёргать упавший LlmClient - письмо
+        // уже помечено обработанным (фолбэк-ответ был успешно отправлен).
+        agentService.processUnread();
+
+        assertEquals(1, mailChannel.repliesSent().size());
+        assertEquals(AgentService.LLM_FAILURE_FALLBACK, mailChannel.repliesSent().get(0).body);
+        assertTrue(seenStore.isSeen("msg-1"));
+        assertEquals(1, llm.callCount());
+    }
+
+    @Test
+    public void mailSendFailureLogsWarnAndStillProcessesNextMessageInBatch() {
+        Msg failing = new Msg("msg-fail", "user@example.com", "Первое",
+                "Первый вопрос", Instant.parse("2026-08-14T09:00:00Z"));
+        Msg ok = new Msg("msg-ok", "user@example.com", "Второе",
+                "Второй вопрос", Instant.parse("2026-08-14T09:05:00Z"));
+        FlakyMailChannel mailChannel = new FlakyMailChannel("msg-fail", failing, ok);
+
+        MockLlmClient llm = new MockLlmClient(
+                ChatResponse.text("ответ на первое"),
+                ChatResponse.text("ответ на второе"));
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
+        ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+
+        agentService.processUnread();
+
+        assertEquals(1, mailChannel.successfulReplies().size());
+        assertSame(ok, mailChannel.successfulReplies().get(0));
+        assertFalse("недоставленное письмо не должно считаться обработанным",
+                seenStore.isSeen("msg-fail"));
+        assertTrue(seenStore.isSeen("msg-ok"));
+    }
+
+    private static final class CountingThrowingLlmClient implements LlmClient {
+        private int callCount = 0;
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+            callCount++;
+            throw new RuntimeException("simulated LLM timeout");
+        }
+
+        int callCount() {
+            return callCount;
+        }
+    }
+
+    private static final class FlakyMailChannel implements MailChannel {
+        private final List<Msg> unread;
+        private final String failingMsgId;
+        private final List<Msg> successfulReplies = new ArrayList<>();
+
+        FlakyMailChannel(String failingMsgId, Msg... unread) {
+            this.failingMsgId = failingMsgId;
+            this.unread = Arrays.asList(unread);
+        }
+
+        @Override
+        public List<Msg> fetchUnread() {
+            return unread;
+        }
+
+        @Override
+        public void reply(Msg original, String body) {
+            if (original.getId().equals(failingMsgId)) {
+                throw new RuntimeException("simulated COM error while sending reply");
+            }
+            successfulReplies.add(original);
+        }
+
+        List<Msg> successfulReplies() {
+            return successfulReplies;
+        }
     }
 
     private static ChatMessageContent lastMessageOfCall(MockLlmClient llm, int callIndex) {
