@@ -37,22 +37,24 @@ public final class ToolLoop {
     public ToolLoopResult run(List<ChatMessage> initialMessages) {
         List<ChatMessage> messages = new ArrayList<>(initialMessages);
         List<ToolSpec> toolSpecs = toolSpecs();
+        List<String> calledToolNames = new ArrayList<>();
 
         for (int step = 0; step < maxSteps; step++) {
             ChatResponse response = llmClient.chat(messages, toolSpecs);
 
             if (!response.hasToolCalls()) {
-                return ToolLoopResult.finalAnswer(response.getContent());
+                return ToolLoopResult.finalAnswer(response.getContent(), calledToolNames);
             }
 
             messages.add(ChatMessage.assistantToolCalls(response.getToolCalls()));
             for (ToolCall call : response.getToolCalls()) {
+                calledToolNames.add(call.getName());
                 String resultJson = executeSafely(call);
                 messages.add(ChatMessage.toolResult(call.getId(), resultJson));
             }
         }
 
-        return ToolLoopResult.stepLimitReached();
+        return ToolLoopResult.stepLimitReached(calledToolNames);
     }
 
     private List<ToolSpec> toolSpecs() {
