@@ -1,11 +1,15 @@
 package com.miniassistant.agent;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.miniassistant.llm.ChatMessage;
 import com.miniassistant.llm.ChatResponse;
 import com.miniassistant.llm.LlmClient;
 import com.miniassistant.llm.MockLlmClient;
 import com.miniassistant.llm.ToolCall;
 import com.miniassistant.llm.ToolSpec;
+import com.miniassistant.logging.Events;
 import com.miniassistant.mail.MailChannel;
 import com.miniassistant.mail.MockMailChannel;
 import com.miniassistant.mail.Msg;
@@ -19,6 +23,7 @@ import com.miniassistant.tools.ToolRegistry;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -183,6 +188,49 @@ public class AgentServiceTest {
         assertFalse("недоставленное письмо не должно считаться обработанным",
                 seenStore.isSeen("msg-fail"));
         assertTrue(seenStore.isSeen("msg-ok"));
+    }
+
+    @Test
+    public void llmFailureLogsMaskedErrorWithoutLeakingEmailAddress() {
+        Msg msg = new Msg("msg-1", "user@example.com", "Вопрос",
+                "Расскажи анекдот", Instant.parse("2026-08-14T09:00:00Z"));
+        MockMailChannel mailChannel = new MockMailChannel(msg);
+
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
+        ToolLoop toolLoop = new ToolLoop(new EmailLeakingLlmClient(), registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+
+        Logger agentLogger = (Logger) LoggerFactory.getLogger(AgentService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        agentLogger.addAppender(appender);
+
+        try {
+            agentService.processUnread();
+        } finally {
+            agentLogger.detachAppender(appender);
+        }
+
+        boolean foundMaskedEvent = false;
+        for (ILoggingEvent event : appender.list) {
+            String formatted = event.getFormattedMessage();
+            assertFalse("email адрес не должен попадать в лог в открытом виде: " + formatted,
+                    formatted.contains("victim@example.com"));
+            if (formatted.contains("event=" + Events.LLM_FAILED)) {
+                assertTrue("замаскированный текст ошибки должен попасть в лог вместо адреса",
+                        formatted.contains("[EMAIL]"));
+                foundMaskedEvent = true;
+            }
+        }
+        assertTrue("должно быть залогировано событие " + Events.LLM_FAILED, foundMaskedEvent);
+    }
+
+    private static final class EmailLeakingLlmClient implements LlmClient {
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+            throw new RuntimeException("upstream rejected request for victim@example.com");
+        }
     }
 
     private static final class CountingThrowingLlmClient implements LlmClient {
