@@ -3,6 +3,10 @@ package com.miniassistant.agent;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniassistant.audit.AuditEntry;
+import com.miniassistant.audit.AuditLog;
+import com.miniassistant.audit.HmacSigner;
 import com.miniassistant.llm.ChatMessage;
 import com.miniassistant.llm.ChatResponse;
 import com.miniassistant.llm.LlmClient;
@@ -26,6 +30,9 @@ import org.junit.rules.TemporaryFolder;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
@@ -85,7 +92,8 @@ public class AgentServiceTest {
 
         ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
         SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
-        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+        AuditLog auditLog = newAuditLog();
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, auditLog);
 
         agentService.processUnread();
 
@@ -129,7 +137,7 @@ public class AgentServiceTest {
         ToolRegistry registry = new ToolRegistry(Collections.<Tool>singletonList(new AddReminderTool(reminderStore)));
         ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
         SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
-        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, newAuditLog());
 
         agentService.processUnread();
         // Повторный опрос того же MailChannel (то же "непрочитанное" письмо) не
@@ -152,7 +160,7 @@ public class AgentServiceTest {
         ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
         ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
         SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
-        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, newAuditLog());
 
         agentService.processUnread();
         // Повторный опрос не должен снова дёргать упавший LlmClient - письмо
@@ -179,7 +187,7 @@ public class AgentServiceTest {
         ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
         ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
         SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
-        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, newAuditLog());
 
         agentService.processUnread();
 
@@ -191,6 +199,34 @@ public class AgentServiceTest {
     }
 
     @Test
+    public void successfullyProcessedMessageAppendsAuditEntryForMailAndForEachToolCall() {
+        Msg msg = new Msg("msg-1", "user@example.com", "Напоминание",
+                "Напомни мне позвонить клиенту завтра в 15:00", Instant.parse("2026-08-14T09:00:00Z"));
+        MockMailChannel mailChannel = new MockMailChannel(msg);
+
+        MockLlmClient llm = new MockLlmClient(
+                ChatResponse.toolCalls(Collections.singletonList(new ToolCall(
+                        "call-1", "add_reminder",
+                        "{\"text\":\"позвонить клиенту\",\"dueIso\":\"2026-08-15T15:00:00Z\"}"))),
+                ChatResponse.text("Напоминание добавлено."));
+
+        ReminderStore reminderStore = new ReminderStore(pathTo("reminders.json"));
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>singletonList(new AddReminderTool(reminderStore)));
+        ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AuditLog auditLog = newAuditLog();
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, auditLog);
+
+        agentService.processUnread();
+
+        assertTrue("цепочка хешей аудит-журнала должна быть целой", auditLog.verifyChain());
+        List<String> events = readAuditEvents();
+        assertEquals(2, events.size());
+        assertEquals("event=" + Events.TOOL_CALLED + " tool=add_reminder", events.get(0));
+        assertEquals("event=" + Events.MAIL_PROCESSED + " msgId=msg-1", events.get(1));
+    }
+
+    @Test
     public void llmFailureLogsMaskedErrorWithoutLeakingEmailAddress() {
         Msg msg = new Msg("msg-1", "user@example.com", "Вопрос",
                 "Расскажи анекдот", Instant.parse("2026-08-14T09:00:00Z"));
@@ -199,7 +235,7 @@ public class AgentServiceTest {
         ToolRegistry registry = new ToolRegistry(Collections.<Tool>emptyList());
         ToolLoop toolLoop = new ToolLoop(new EmailLeakingLlmClient(), registry, 5);
         SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
-        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore, newAuditLog());
 
         Logger agentLogger = (Logger) LoggerFactory.getLogger(AgentService.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -294,5 +330,22 @@ public class AgentServiceTest {
 
     private Path pathTo(String relative) {
         return new File(tempFolder.getRoot(), relative).toPath();
+    }
+
+    private AuditLog newAuditLog() {
+        return new AuditLog(pathTo("audit.jsonl"), new HmacSigner("test-hmac-key"));
+    }
+
+    private List<String> readAuditEvents() {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            List<String> events = new ArrayList<>();
+            for (String line : Files.readAllLines(pathTo("audit.jsonl"), StandardCharsets.UTF_8)) {
+                events.add(mapper.readValue(line, AuditEntry.class).getEvent());
+            }
+            return events;
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 }
