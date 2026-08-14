@@ -79,7 +79,11 @@ public final class Main {
                 pollLoop(agentService, config.getMail().getPollSeconds(), running);
                 logger.info("event=agent_stopped");
             }
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
+            // Throwable, а не RuntimeException: JACOB при отсутствующей
+            // jacob-*.dll на PATH бросает UnsatisfiedLinkError (Error, не
+            // Exception) - без этого расширения такая ошибка ушла бы наружу
+            // сырым стектрейсом, обнаружено на живом смоук-запуске в M14.
             logger.error("event=agent_fatal_error error={}", PiiMasker.mask(e.toString()));
             System.exit(1);
         }
