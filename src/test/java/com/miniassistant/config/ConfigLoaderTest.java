@@ -84,4 +84,32 @@ public class ConfigLoaderTest {
 
         llm.resolveApiKey(emptyEnv);
     }
+
+    @Test
+    public void resolvesHmacKeyFromInjectableEnvProviderWithoutTouchingRealEnv() {
+        AuditConfig audit = new AuditConfig();
+        audit.setHmacKeyEnv("AUDIT_HMAC_KEY");
+        EnvProvider fakeEnv = new EnvProvider() {
+            @Override
+            public String getenv(String name) {
+                return "AUDIT_HMAC_KEY".equals(name) ? "hmac-test-secret" : null;
+            }
+        };
+
+        assertEquals("hmac-test-secret", audit.resolveHmacKey(fakeEnv));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void resolveHmacKeyThrowsWhenDeclaredEnvVarIsNotSet() {
+        AuditConfig audit = new AuditConfig();
+        audit.setHmacKeyEnv("MISSING_VAR");
+        EnvProvider emptyEnv = new EnvProvider() {
+            @Override
+            public String getenv(String name) {
+                return null;
+            }
+        };
+
+        audit.resolveHmacKey(emptyEnv);
+    }
 }
