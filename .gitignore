@@ -17,3 +17,8 @@ config.yaml
 .idea/
 *.iml
 .vscode/
+
+# сырой JSONL-транскрипт сессии - источник для docs/claude-code-session-export.md,
+# в git не идёт (объёмный, содержит служебные данные харнесса); в репозиторий
+# попадает только уже отрендеренный и промаскированный .md
+docs/claude-code-session-export.jsonl
