@@ -40,6 +40,21 @@ public class ToolLoopTest {
     }
 
     @Test
+    public void recordsNamesOfToolsCalledDuringTheRunEvenWhenUnknownOrFailing() {
+        ToolCall okCall = new ToolCall("call-1", "echo", "{}");
+        ToolCall unknownCall = new ToolCall("call-2", "does_not_exist", "{}");
+        MockLlmClient llm = new MockLlmClient(
+                ChatResponse.toolCalls(java.util.Arrays.asList(okCall, unknownCall)),
+                ChatResponse.text("готово"));
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>singletonList(fixedTool("echo", "{}")));
+        ToolLoop loop = new ToolLoop(llm, registry, 5);
+
+        ToolLoopResult result = loop.run(Collections.singletonList(ChatMessage.user("hi")));
+
+        assertEquals(java.util.Arrays.asList("echo", "does_not_exist"), result.getCalledToolNames());
+    }
+
+    @Test
     public void stopsAtMaxStepsWithoutExceptionWhenModelNeverFinishes() {
         ChatResponse alwaysToolCall = ChatResponse.toolCalls(
                 Collections.singletonList(new ToolCall("call-1", "echo", "{}")));
