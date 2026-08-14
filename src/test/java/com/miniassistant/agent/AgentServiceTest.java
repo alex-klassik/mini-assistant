@@ -1,0 +1,154 @@
+package com.miniassistant.agent;
+
+import com.miniassistant.llm.ChatResponse;
+import com.miniassistant.llm.MockLlmClient;
+import com.miniassistant.llm.ToolCall;
+import com.miniassistant.mail.MockMailChannel;
+import com.miniassistant.mail.Msg;
+import com.miniassistant.store.SeenStore;
+import com.miniassistant.tools.AddReminderTool;
+import com.miniassistant.tools.CurrentDatetimeTool;
+import com.miniassistant.tools.FindItemsTool;
+import com.miniassistant.tools.ReminderStore;
+import com.miniassistant.tools.Tool;
+import com.miniassistant.tools.ToolRegistry;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import java.io.File;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+
+public class AgentServiceTest {
+
+    @Rule
+    public TemporaryFolder tempFolder = new TemporaryFolder();
+
+    @Test
+    public void processesFourGoldenEmailsFromTheAssignment() {
+        Msg reminderMsg = new Msg("msg-reminder", "user@example.com", "Напоминание",
+                "Напомни мне позвонить клиенту завтра в 15:00", Instant.parse("2026-08-14T09:00:00Z"));
+        Msg listMsg = new Msg("msg-list", "user@example.com", "Список",
+                "Покажи мои напоминания", Instant.parse("2026-08-14T09:05:00Z"));
+        Msg dateMsg = new Msg("msg-date", "user@example.com", "Дата",
+                "Какая сегодня дата?", Instant.parse("2026-08-14T09:10:00Z"));
+        Msg garbageMsg = new Msg("msg-garbage", "user@example.com", "",
+                "???", Instant.parse("2026-08-14T09:15:00Z"));
+        MockMailChannel mailChannel = new MockMailChannel(reminderMsg, listMsg, dateMsg, garbageMsg);
+
+        ReminderStore reminderStore = new ReminderStore(pathTo("reminders.json"));
+        reminderStore.add("купить молоко", "2026-08-16T10:00:00Z");
+
+        Clock fixedClock = Clock.fixed(Instant.parse("2026-08-14T09:00:00Z"), ZoneOffset.UTC);
+        ToolRegistry registry = new ToolRegistry(Arrays.<Tool>asList(
+                new AddReminderTool(reminderStore),
+                new FindItemsTool(reminderStore),
+                new CurrentDatetimeTool(fixedClock)));
+
+        MockLlmClient llm = new MockLlmClient(
+                // 1. напоминание
+                ChatResponse.toolCalls(Collections.singletonList(new ToolCall(
+                        "call-reminder", "add_reminder",
+                        "{\"text\":\"позвонить клиенту\",\"dueIso\":\"2026-08-15T15:00:00Z\"}"))),
+                ChatResponse.text("Напоминание добавлено."),
+                // 2. список
+                ChatResponse.toolCalls(Collections.singletonList(new ToolCall(
+                        "call-list", "find_items", "{\"query\":\"\"}"))),
+                ChatResponse.text("Вот ваши напоминания: купить молоко."),
+                // 3. текущая дата
+                ChatResponse.toolCalls(Collections.singletonList(new ToolCall(
+                        "call-date", "current_datetime", "{}"))),
+                ChatResponse.text("Сегодня 2026-08-14."),
+                // 4. пустое/мусорное письмо - модель отвечает сразу, без инструментов
+                ChatResponse.text("Не понял ваш запрос, уточните, пожалуйста."));
+
+        ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+
+        agentService.processUnread();
+
+        List<MockMailChannel.RecordedReply> replies = mailChannel.repliesSent();
+        assertEquals(4, replies.size());
+
+        assertSame(reminderMsg, replies.get(0).original);
+        assertEquals("Напоминание добавлено.", replies.get(0).body);
+
+        assertSame(listMsg, replies.get(1).original);
+        assertEquals("Вот ваши напоминания: купить молоко.", replies.get(1).body);
+
+        assertSame(dateMsg, replies.get(2).original);
+        assertEquals("Сегодня 2026-08-14.", replies.get(2).body);
+
+        assertSame(garbageMsg, replies.get(3).original);
+        assertEquals("Не понял ваш запрос, уточните, пожалуйста.", replies.get(3).body);
+
+        // Тексты финальных ответов - просто скрипт мока. Дальше проверяем, что
+        // соответствующие инструменты реально выполнились, а не были пропущены.
+        assertTrue("add_reminder должен был сохранить новую запись",
+                reminderStore.findByText("позвонить клиенту").size() == 1);
+        assertTrue("find_items должен был найти предзаполненную запись",
+                lastMessageOfCall(llm, 3).getContent().contains("купить молоко"));
+        assertEquals("{\"iso\":\"2026-08-14T09:00:00Z\"}", lastMessageOfCall(llm, 5).getContent());
+    }
+
+    @Test
+    public void repeatedProcessUnreadDoesNotReplyTwiceToSameMessage() {
+        Msg msg = new Msg("msg-reminder", "user@example.com", "Напоминание",
+                "Напомни мне позвонить клиенту завтра в 15:00", Instant.parse("2026-08-14T09:00:00Z"));
+        MockMailChannel mailChannel = new MockMailChannel(msg);
+
+        MockLlmClient llm = new MockLlmClient(
+                ChatResponse.toolCalls(Collections.singletonList(new ToolCall(
+                        "call-1", "add_reminder",
+                        "{\"text\":\"позвонить клиенту\",\"dueIso\":\"2026-08-15T15:00:00Z\"}"))),
+                ChatResponse.text("Напоминание добавлено."));
+
+        ReminderStore reminderStore = new ReminderStore(pathTo("reminders.json"));
+        ToolRegistry registry = new ToolRegistry(Collections.<Tool>singletonList(new AddReminderTool(reminderStore)));
+        ToolLoop toolLoop = new ToolLoop(llm, registry, 5);
+        SeenStore seenStore = new SeenStore(pathTo("seen.txt"));
+        AgentService agentService = new AgentService(mailChannel, toolLoop, seenStore);
+
+        agentService.processUnread();
+        // Повторный опрос того же MailChannel (то же "непрочитанное" письмо) не
+        // должен породить второй ответ - SeenStore должен отфильтровать его. Если
+        // бы AgentService переобработал письмо, MockLlmClient бросил бы
+        // IllegalStateException (скрипт из двух ответов уже исчерпан).
+        agentService.processUnread();
+
+        assertEquals(1, mailChannel.repliesSent().size());
+        assertEquals(1, reminderStore.findByText("позвонить клиенту").size());
+    }
+
+    private static ChatMessageContent lastMessageOfCall(MockLlmClient llm, int callIndex) {
+        return new ChatMessageContent(llm.recordedMessages().get(callIndex));
+    }
+
+    /** Небольшая обёртка, чтобы не тащить import ChatMessage только ради одного метода. */
+    private static final class ChatMessageContent {
+        private final List<com.miniassistant.llm.ChatMessage> messages;
+
+        ChatMessageContent(List<com.miniassistant.llm.ChatMessage> messages) {
+            this.messages = messages;
+        }
+
+        String getContent() {
+            return messages.get(messages.size() - 1).getContent();
+        }
+    }
+
+    private Path pathTo(String relative) {
+        return new File(tempFolder.getRoot(), relative).toPath();
+    }
+}
